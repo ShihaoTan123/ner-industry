@@ -1,12 +1,4 @@
 ner-industry/
-  data/
-    scierc/
-      raw/
-      processed/
-      prepared/
-    scienceie/
-      raw/
-      prepared/
   configs/
     scierc_bert.yaml
     scierc_scibert.yaml
