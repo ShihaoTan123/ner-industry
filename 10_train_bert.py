@@ -14,7 +14,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ---------- utils ----------
 def align_labels_with_tokens(tokenized_inputs, labels, label2id):
     out = []
     for i, labs in enumerate(labels):
@@ -34,7 +33,6 @@ def make_metrics_fn(id2label):
     def _metrics_fn(eval_preds):
         preds, gold = eval_preds
         preds = np.argmax(preds, axis=-1)
-
         t_labels, t_preds = [], []
         for p, g in zip(preds, gold):
             pl, gl = [], []
@@ -44,7 +42,6 @@ def make_metrics_fn(id2label):
                     pl.append(id2label[int(pi)])
             if gl:
                 t_labels.append(gl); t_preds.append(pl)
-
         return {
             "f1": f1_score(t_labels, t_preds, average="micro"),
             "precision": precision_score(t_labels, t_preds, average="micro"),
@@ -52,7 +49,6 @@ def make_metrics_fn(id2label):
         }
     return _metrics_fn
 
-# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description="Minimal BERT NER Trainer")
     ap.add_argument("--train", required=True)
@@ -60,7 +56,6 @@ def main():
     ap.add_argument("--test",  required=True)
     ap.add_argument("--labels", required=True)
     ap.add_argument("--out_dir", required=True)
-
     ap.add_argument("--model_name", default="bert-base-uncased")
     ap.add_argument("--max_len", type=int, default=256)
     ap.add_argument("--epochs", type=int, default=5)
@@ -80,13 +75,11 @@ def main():
     set_seed(args.seed)
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 
-    # labels
     labels = [l.strip() for l in open(args.labels, encoding="utf-8") if l.strip()]
     id2label = {i: l for i, l in enumerate(labels)}
     label2id = {l: i for i, l in id2label.items()}
     log.info(f"#labels={len(labels)} -> {labels}")
 
-    # data
     ds = load_dataset("json", data_files={"train": args.train, "validation": args.dev, "test": args.test})
     tok = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -101,7 +94,6 @@ def main():
     cols = ds["train"].column_names
     ds_tok = ds.map(proc, batched=True, remove_columns=cols, desc="Tokenize+Align")
 
-    # model & collator
     model = AutoModelForTokenClassification.from_pretrained(
         args.model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
     )
@@ -109,7 +101,6 @@ def main():
         tokenizer=tok, pad_to_multiple_of=8 if (args.fp16 or args.bf16) else None
     )
 
-    # training args (transformers==4.57.0)
     targs = TrainingArguments(
         output_dir=str(out),
         seed=args.seed,
@@ -129,10 +120,10 @@ def main():
         logging_dir=str(out / "logs"),
         logging_steps=50,
         save_total_limit=3,
-        report_to=[],       # 关闭wandb等
+        report_to=[],
         fp16=args.fp16,
         bf16=args.bf16,
-        dataloader_num_workers=0,  # colab更稳
+        dataloader_num_workers=0,
         remove_unused_columns=False,
     )
 
@@ -143,17 +134,15 @@ def main():
         args=targs,
         train_dataset=ds_tok["train"],
         eval_dataset=ds_tok["validation"],
-        tokenizer=tok,                  # 可能有FutureWarning, 可忽略
+        tokenizer=tok,
         data_collator=collator,
         compute_metrics=make_metrics_fn(id2label),
         callbacks=callbacks,
     )
 
-    # train
     log.info("== train ==")
     trainer.train()
 
-    # test eval + save
     log.info("== test ==")
     test_metrics = trainer.evaluate(ds_tok["test"])
     pred_out = trainer.predict(ds_tok["test"])
@@ -186,4 +175,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
