@@ -24,15 +24,18 @@ class NERSet(Dataset):
     def __getitem__(self,i):
         return torch.tensor(self.X[i]), torch.tensor(self.Y[i])
 
-def pad_batch(batch, pad_id):
-    xs,ys=zip(*batch)
-    maxlen=max(len(x) for x in xs)
-    Xp=torch.full((len(xs),maxlen), pad_id, dtype=torch.long)
-    Yp=torch.full((len(xs),maxlen), -100, dtype=torch.long)
-    mask=torch.zeros((len(xs),maxlen), dtype=torch.bool)
-    for i,(x,y) in enumerate(zip(xs,ys)):
-        L=len(x); Xp[i,:L]=x; Yp[i,:L]=y; mask[i,:L]=1
-    return Xp,Yp,mask
+def pad_batch(batch, pad_id, pad_label_id):
+    xs, ys = zip(*batch)
+    maxlen = max(len(x) for x in xs)
+    Xp = torch.full((len(xs), maxlen), pad_id, dtype=torch.long)
+    Yp = torch.full((len(xs), maxlen), pad_label_id, dtype=torch.long)
+    mask = torch.zeros((len(xs), maxlen), dtype=torch.bool)
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        L = len(x)
+        Xp[i, :L] = x
+        Yp[i, :L] = y
+        mask[i, :L] = 1
+    return Xp, Yp, mask
 
 class BiLSTM_CRF(nn.Module):
     def __init__(self, vocab_size, emb_dim, hidden, num_labels, pad_id, dropout=0.33):
@@ -66,9 +69,10 @@ def main():
     cnt=Counter([w for x,_ in train for w in x]); vocab=[PAD,UNK]+[w for w,c in cnt.items() if c>=1]
     word2id={w:i for i,w in enumerate(vocab)}
 
-    train_loader=DataLoader(NERSet(train,word2id,label2id), batch_size=args.batch, shuffle=True,  collate_fn=lambda b:pad_batch(b, word2id[PAD]))
-    dev_loader  =DataLoader(NERSet(dev,  word2id,label2id), batch_size=args.batch, shuffle=False, collate_fn=lambda b:pad_batch(b, word2id[PAD]))
-    test_loader =DataLoader(NERSet(test, word2id,label2id), batch_size=args.batch, shuffle=False, collate_fn=lambda b:pad_batch(b, word2id[PAD]))
+    pad_label_id = label2id['O']
+    train_loader=DataLoader(NERSet(train,word2id,label2id), batch_size=args.batch, shuffle=True,  collate_fn=lambda b:pad_batch(b, word2id[PAD], pad_label_id), num_workers=2, pin_memory=True)
+    dev_loader  =DataLoader(NERSet(dev,  word2id,label2id), batch_size=args.batch, shuffle=False, collate_fn=lambda b:pad_batch(b, word2id[PAD], pad_label_id), num_workers=2, pin_memory=True)
+    test_loader =DataLoader(NERSet(test, word2id,label2id), batch_size=args.batch, shuffle=False, collate_fn=lambda b:pad_batch(b, word2id[PAD], pad_label_id), num_workers=2, pin_memory=True)
 
     device="cuda" if torch.cuda.is_available() else "cpu"
     model=BiLSTM_CRF(vocab_size=len(vocab), emb_dim=args.emb_dim, hidden=args.hidden, num_labels=len(labels),
