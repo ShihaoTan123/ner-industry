@@ -338,7 +338,7 @@ def main():
                 break
     
     logger.info("Loading best model for final evaluation...")
-    checkpoint = torch.load(output_dir / "best_model.pt", map_location=device)
+    checkpoint = torch.load(output_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
     test_metrics = evaluate(model, test_loader, id2label, device)
