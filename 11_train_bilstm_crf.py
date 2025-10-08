@@ -164,5 +164,4 @@ def main():
     print(test_metrics["report"])
 
 if __name__ == "__main__":
- 
-::contentReference[oaicite:0]{index=0}
+    main()
