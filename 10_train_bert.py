@@ -16,12 +16,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 class WeightedTokenTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if class_weights is None:
+            raise ValueError("class_weights is required")
+        self.class_weights = class_weights
+
     def compute_loss(
         self,
         model,
         inputs,
         return_outputs: bool = False,
-        num_items_in_batch: int | None = None, 
+        num_items_in_batch: int | None = None,
         **kwargs,
     ):
         labels = inputs.get("labels")
@@ -29,14 +35,14 @@ class WeightedTokenTrainer(Trainer):
             inputs = {k: v for k, v in inputs.items() if k != "labels"}
 
         outputs = model(**inputs)
-        logits  = outputs.logits
+        logits  = outputs.logits  # [bsz, seq, num_labels]
 
-        cw = class_weights.to(logits.device)
+        cw = self.class_weights.to(logits.device)
         loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
         loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
 
         return (loss, outputs) if return_outputs else loss
-
+        
 def align_labels_with_tokens(tokenized_inputs, labels, label2id):
     out = []
     for i, labs in enumerate(labels):
@@ -167,10 +173,11 @@ def main():
         args=targs,
         train_dataset=ds_tok["train"],
         eval_dataset=ds_tok["validation"],
-        tokenizer=tok,
+        processing_class=tok,
         data_collator=collator,
         compute_metrics=make_metrics_fn(id2label),
         callbacks=callbacks,
+        class_weights=class_weights,
     )
 
     log.info("== train ==")
