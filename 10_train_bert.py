@@ -1,4 +1,5 @@
 import argparse, json, logging
+import torch, torch.nn as nn
 from pathlib import Path
 import numpy as np
 from datasets import load_dataset
@@ -67,6 +68,8 @@ def main():
     ap.add_argument("--bf16", action="store_true")
     ap.add_argument("--early_stopping", action="store_true")
     ap.add_argument("--patience", type=int, default=3)
+    ap.add_argument("--b_weight", type=float, default=2.0, help="multiplier for all B-* labels")
+    ap.add_argument("--task_weight", type=float, default=1.5, help="extra multiplier for *-Task")
     args = ap.parse_args()
 
     if args.fp16 and args.bf16:
@@ -127,9 +130,26 @@ def main():
         remove_unused_columns=False,
     )
 
+    class_weights = torch.ones(len(labels))
+    for lab, idx in label2id.items():
+        if lab.startswith("B-"):
+            class_weights[idx] *= args.b_weight
+        if lab.endswith("Task"):
+            class_weights[idx] *= args.task_weight
+    log.info("Class weights: " + ", ".join(f"{lab}:{float(class_weights[label2id[lab]]):.2f}" for lab in labels))
+    
+    class WeightedTokenTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False):
+            labels = inputs.get("labels")
+            outputs = model(**{k:v for k,v in inputs.items() if k!="labels"})
+            logits  = outputs.logits                             # [bsz, seq, num_labels]
+            cw = class_weights.to(logits.device)
+            loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
+            loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+            return (loss, outputs) if return_outputs else loss
     callbacks = [EarlyStoppingCallback(early_stopping_patience=args.patience)] if args.early_stopping else None
 
-    trainer = Trainer(
+    trainer = WeightedTokenTrainer(
         model=model,
         args=targs,
         train_dataset=ds_tok["train"],
