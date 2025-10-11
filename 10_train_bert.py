@@ -40,14 +40,13 @@ class CRFTrainer(Trainer):
         with torch.no_grad():
             outputs = model(**net_inputs)
             emissions = outputs["logits"].float()
-            mask = inputs["attention_mask"].bool()
+            mask = labels.ne(-100) if has_labels else inputs["attention_mask"].bool()  # <<<<<<
 
             loss = None
             if has_labels:
                 O_ID = model.config.label2id.get("O", 0)
-                labels_crf = labels.clone()
-                labels_crf[labels_crf == -100] = O_ID
-                loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
+                labels_crf = labels.masked_fill(labels.eq(-100), O_ID)
+                loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction="mean")
 
             paths = model.crf.decode(emissions, mask=mask)
 
@@ -58,11 +57,6 @@ class CRFTrainer(Trainer):
         if prediction_loss_only:
             return (loss, None, None)
         return (loss, pred, labels)
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
-        outputs = model(**inputs)
-        loss = outputs["loss"]
-        return (loss, outputs) if return_outputs else loss
         
 class BertCRFForTokenClassification(nn.Module):
     def __init__(self, base_model_name, num_labels, id2label, label2id, scheme="BIOES", constraints=None):
@@ -87,14 +81,19 @@ class BertCRFForTokenClassification(nn.Module):
                     self.crf.end_transitions[i] = 0.0
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        emissions = self.classifier(out.last_hidden_state).float()
-        mask = attention_mask.bool() if attention_mask is not None else torch.ones(emissions.size()[:2], dtype=torch.bool, device=emissions.device)
-        loss = None
+        emissions = self.classifier(out.last_hidden_state).to(dtype=torch.float32)
+    
         if labels is not None:
+            mask = labels.ne(-100)
             O_ID = self.config.label2id.get("O", 0)
-            labels_filled = labels.clone()
-            labels_filled[labels_filled == -100] = O_ID
-            loss = - self.crf(emissions, labels_filled.long(), mask=mask, reduction='mean')
+            labels_filled = labels.masked_fill(labels.eq(-100), O_ID)
+            loss = - self.crf(emissions, labels_filled.long(), mask=mask, reduction="mean")
+        else:
+            mask = attention_mask.bool() if attention_mask is not None else torch.ones(
+                emissions.size()[:2], dtype=torch.bool, device=emissions.device
+            )
+            loss = None
+    
         return {"loss": loss, "logits": emissions, "mask": mask}
 
 def align_labels_with_tokens(tokenized_inputs, labels, label2id):
@@ -230,7 +229,14 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model_name)
 
     def proc(batch):
-        enc = tok(batch["tokens"], is_split_into_words=True, truncation=True, max_length=args.max_len, padding=False)
+        enc = tok(
+            batch["tokens"],
+            is_split_into_words=True,
+            truncation=True,
+            max_length=args.max_len,
+            padding=False,
+            add_special_tokens=False,
+        )
         enc["labels"] = align_labels_with_tokens(enc, batch["labels"], label2id)
         return enc
 
