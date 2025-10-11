@@ -80,6 +80,7 @@ class BertCRFForTokenClassification(nn.Module):
                 for i in constraints["end_ok"]:
                     self.crf.end_transitions[i] = 0.0
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        kwargs.pop("num_items_in_batch", None):
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
         emissions = self.classifier(out.last_hidden_state).to(dtype=torch.float32)
     
