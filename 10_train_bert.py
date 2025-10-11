@@ -9,7 +9,6 @@ from transformers import (
     DataCollatorForTokenClassification, Trainer, TrainingArguments,
     EarlyStoppingCallback, set_seed,
     AutoModel
-
 )
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 
@@ -17,6 +16,35 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 log = logging.getLogger(__name__)
+
+
+class WeightedTokenTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if class_weights is None:
+            raise ValueError("class_weights is required")
+        self.class_weights = class_weights
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs: bool = False,
+        num_items_in_batch: int | None = None,
+        **kwargs,
+    ):
+        labels = inputs.get("labels")
+        if "labels" in inputs:
+            inputs = {k: v for k, v in inputs.items() if k != "labels"}
+
+        outputs = model(**inputs)
+        logits  = outputs.logits
+
+        cw = self.class_weights.to(device=logits.device, dtype=logits.dtype)
+        loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
+        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
 
 
 class CRFTrainer(Trainer):
@@ -49,34 +77,43 @@ class CRFTrainer(Trainer):
         loss = outputs["loss"]
         return (loss, outputs) if return_outputs else loss
 
-class WeightedTokenTrainer(Trainer):
-    def __init__(self, *args, class_weights=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        if class_weights is None:
-            raise ValueError("class_weights is required")
-        self.class_weights = class_weights
 
-    def compute_loss(
-        self,
-        model,
-        inputs,
-        return_outputs: bool = False,
-        num_items_in_batch: int | None = None,
-        **kwargs,
-    ):
-        labels = inputs.get("labels")
-        if "labels" in inputs:
-            inputs = {k: v for k, v in inputs.items() if k != "labels"}
+class BertCRFForTokenClassification(nn.Module):
+    def __init__(self, base_model_name, num_labels, id2label, label2id, scheme="BIOES", constraints=None):
+        super().__init__()
+        self.bert = AutoModel.from_pretrained(base_model_name)
+        self.num_labels = num_labels
+        self.classifier = nn.Linear(self.bert.config.hidden_size, num_labels)
+        self.crf = CRF(num_labels, batch_first=True)
+        self.config = type("Cfg", (), {})()
+        self.config.id2label = id2label
+        self.config.label2id = label2id
+        self.config.num_labels = num_labels
+        self.scheme = scheme
 
-        outputs = model(**inputs)
-        logits  = outputs.logits
+        if constraints is not None:
+            BIG_NEG = -1e4
+            with torch.no_grad():
+                self.crf.transitions[:] = BIG_NEG
+                for (i,j) in constraints["trans"]:
+                    self.crf.transitions[i,j] = 0.0
+                self.crf.start_transitions[:] = BIG_NEG
+                self.crf.end_transitions[:]   = BIG_NEG
+                for i in constraints["start_ok"]:
+                    self.crf.start_transitions[i] = 0.0
+                for i in constraints["end_ok"]:
+                    self.crf.end_transitions[i] = 0.0
 
-        cw = self.class_weights.to(device=logits.device, dtype=logits.dtype)
-        loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
-        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+        emissions = self.classifier(out.last_hidden_state)
+        mask = (labels != -100) if labels is not None else attention_mask.bool()
+        loss = None
+        if labels is not None:
+            loss = - self.crf(emissions, labels.long(), mask=mask, reduction='mean')
+        return {"loss": loss, "logits": emissions, "mask": mask}
 
-        return (loss, outputs) if return_outputs else loss
-        
+
 def align_labels_with_tokens(tokenized_inputs, labels, label2id):
     out = []
     for i, labs in enumerate(labels):
@@ -167,40 +204,6 @@ def make_metrics_fn(id2label, num_labels):
         }
     return _metrics_fn
 
-class BertCRFForTokenClassification(nn.Module):
-    def __init__(self, base_model_name, num_labels, id2label, label2id, scheme="BIOES", constraints=None):
-        super().__init__()
-        self.bert = AutoModel.from_pretrained(base_model_name)
-        self.num_labels = num_labels
-        self.classifier = nn.Linear(self.bert.config.hidden_size, num_labels)
-        self.crf = CRF(num_labels, batch_first=True)
-        self.config = type("Cfg", (), {})()
-        self.config.id2label = id2label
-        self.config.label2id = label2id
-        self.config.num_labels = num_labels
-        self.scheme = scheme
-
-        if constraints is not None:
-            BIG_NEG = -1e4
-            with torch.no_grad():
-                self.crf.transitions[:] = BIG_NEG
-                for (i,j) in constraints["trans"]:
-                    self.crf.transitions[i,j] = 0.0
-                self.crf.start_transitions[:] = BIG_NEG
-                self.crf.end_transitions[:]   = BIG_NEG
-                for i in constraints["start_ok"]:
-                    self.crf.start_transitions[i] = 0.0
-                for i in constraints["end_ok"]:
-                    self.crf.end_transitions[i] = 0.0
-
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        emissions = self.classifier(out.last_hidden_state)
-        mask = (labels != -100) if labels is not None else attention_mask.bool()
-        loss = None
-        if labels is not None:
-            loss = - self.crf(emissions, labels.long(), mask=mask, reduction='mean')
-        return {"loss": loss, "logits": emissions, "mask": mask}
 
 def main():
     ap = argparse.ArgumentParser(description="Minimal BERT NER Trainer")
@@ -252,9 +255,6 @@ def main():
     cols = ds["train"].column_names
     ds_tok = ds.map(proc, batched=True, remove_columns=cols, desc="Tokenize+Align")
 
-    model = AutoModelForTokenClassification.from_pretrained(
-        args.model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
-    )
     collator = DataCollatorForTokenClassification(
         tokenizer=tok, pad_to_multiple_of=8 if (args.fp16 or args.bf16) else None
     )
@@ -285,14 +285,6 @@ def main():
         remove_unused_columns=False,
     )
 
-    class_weights = torch.ones(len(labels))
-    for lab, idx in label2id.items():
-        if lab.startswith("B-"):
-            class_weights[idx] *= args.b_weight
-        if lab.endswith("Task"):
-            class_weights[idx] *= args.task_weight
-    log.info("Class weights: " + ", ".join(f"{lab}:{float(class_weights[label2id[lab]]):.2f}" for lab in labels))
-    
     callbacks = [EarlyStoppingCallback(early_stopping_patience=args.patience)] if args.early_stopping else None
 
     if args.use_crf:
@@ -319,10 +311,6 @@ def main():
         )
 
     else:
-        model = AutoModelForTokenClassification.from_pretrained(
-            args.model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
-        )
-
         class_weights = torch.ones(len(labels))
         for lab, idx in label2id.items():
             if lab.startswith("B-"):
@@ -331,19 +319,9 @@ def main():
                 class_weights[idx] *= args.task_weight
         log.info("Class weights: " + ", ".join(f"{lab}:{float(class_weights[label2id[lab]]):.2f}" for lab in labels))
 
-        class WeightedTokenTrainer(Trainer):
-            def __init__(self, *args, class_weights=None, **kwargs):
-                super().__init__(*args, **kwargs)
-                if class_weights is None: raise ValueError("class_weights is required")
-                self.class_weights = class_weights
-            def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
-                labels = inputs.get("labels")
-                outputs = model(**{k:v for k,v in inputs.items() if k!="labels"})
-                logits  = outputs.logits
-                cw = self.class_weights.to(device=logits.device, dtype=logits.dtype)
-                loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
-                loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
-                return (loss, outputs) if return_outputs else loss
+        model = AutoModelForTokenClassification.from_pretrained(
+            args.model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
+        )
 
         trainer = WeightedTokenTrainer(
             model=model,
