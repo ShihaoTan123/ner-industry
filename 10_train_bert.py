@@ -15,6 +15,28 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+class WeightedTokenTrainer(Trainer):
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs: bool = False,
+        num_items_in_batch: int | None = None, 
+        **kwargs,
+    ):
+        labels = inputs.get("labels")
+        if "labels" in inputs:
+            inputs = {k: v for k, v in inputs.items() if k != "labels"}
+
+        outputs = model(**inputs)
+        logits  = outputs.logits
+
+        cw = class_weights.to(logits.device)
+        loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
+        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+        return (loss, outputs) if return_outputs else loss
+
 def align_labels_with_tokens(tokenized_inputs, labels, label2id):
     out = []
     for i, labs in enumerate(labels):
@@ -138,15 +160,6 @@ def main():
             class_weights[idx] *= args.task_weight
     log.info("Class weights: " + ", ".join(f"{lab}:{float(class_weights[label2id[lab]]):.2f}" for lab in labels))
     
-    class WeightedTokenTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
-            labels = inputs.get("labels")
-            outputs = model(**{k:v for k,v in inputs.items() if k!="labels"})
-            logits  = outputs.logits                             # [bsz, seq, num_labels]
-            cw = class_weights.to(logits.device)
-            loss_fct = nn.CrossEntropyLoss(weight=cw, ignore_index=-100)
-            loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
-            return (loss, outputs) if return_outputs else loss
     callbacks = [EarlyStoppingCallback(early_stopping_patience=args.patience)] if args.early_stopping else None
 
     trainer = WeightedTokenTrainer(
