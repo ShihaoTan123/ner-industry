@@ -8,7 +8,7 @@ from transformers import (
     AutoTokenizer, AutoModelForTokenClassification,
     DataCollatorForTokenClassification, Trainer, TrainingArguments,
     EarlyStoppingCallback, set_seed,
-    AutoModel
+    AutoModel, AutoConfig
 )
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 
@@ -85,10 +85,12 @@ class BertCRFForTokenClassification(nn.Module):
         self.num_labels = num_labels
         self.classifier = nn.Linear(self.bert.config.hidden_size, num_labels)
         self.crf = CRF(num_labels, batch_first=True)
-        self.config = type("Cfg", (), {})()
-        self.config.id2label = id2label
-        self.config.label2id = label2id
-        self.config.num_labels = num_labels
+        self.config = AutoConfig.from_pretrained(
+            base_model_name,
+            num_labels=num_labels,
+            id2label=id2label,
+            label2id=label2id,
+        )
         self.scheme = scheme
 
         if constraints is not None:
@@ -106,7 +108,7 @@ class BertCRFForTokenClassification(nn.Module):
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        emissions = self.classifier(out.last_hidden_state)
+        emissions = self.classifier(out.last_hidden_state).float()
         mask = (labels != -100) if labels is not None else attention_mask.bool()
         loss = None
         if labels is not None:
@@ -170,7 +172,7 @@ def start_end_allowed(labels, scheme="BIOES"):
         t, _ = parse_tag_type(L)
         if scheme == "BIO":
             if L=="O" or t in ("B",): start_ok.add(i)
-            if L=="O" or t in ("B","I"): end_ok.add(i)
+            if L=="O" or t in ("I",): end_ok.add(i)
         else:
             if L=="O" or t in ("B","S"): start_ok.add(i)
             if L=="O" or t in ("E","S"): end_ok.add(i)
