@@ -23,8 +23,7 @@ class WeightedTokenTrainer(Trainer):
         self.class_weights = class_weights
     def compute_loss(self, model, inputs, return_outputs: bool = False, num_items_in_batch: int | None = None, **kwargs):
         labels = inputs.get("labels")
-        if "labels" in inputs:
-            inputs = {k: v for k, v in inputs.items() if k != "labels"}
+        inputs = {k: v for k, v in inputs.items() if k != "labels"}
         outputs = model(**inputs)
         logits  = outputs.logits
         cw = self.class_weights.to(device=logits.device, dtype=logits.dtype)
@@ -54,9 +53,7 @@ class CRFTrainer(Trainer):
             O_ID = model.config.label2id.get("O", 0)
             labels_crf = labels.clone()
             labels_crf[labels_crf == -100] = O_ID
-            with torch.no_grad():
-                loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
-            loss = loss.detach()
+            loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
         if prediction_loss_only:
             return (loss, None, None)
         return (loss, pred, labels)
@@ -157,7 +154,7 @@ def start_end_allowed(labels, scheme="BIOES"):
         if scheme == "BIO":
             if L == "O" or t in ("B",):
                 start_ok.add(i)
-            if L == "O" or t in ("I",):
+            if L == "O" or t in ("B", "I"):
                 end_ok.add(i)
         else:
             if L == "O" or t in ("B", "S"):
