@@ -35,33 +35,35 @@ class CRFTrainer(Trainer):
     def prediction_step(self, model, inputs, prediction_loss_only=False, ignore_keys=None):
         has_labels = "labels" in inputs
         labels = inputs.get("labels")
+        net_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+
         with torch.no_grad():
-            net_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             outputs = model(**net_inputs)
             emissions = outputs["logits"].float()
             mask = inputs["attention_mask"].bool()
+
+            loss = None
+            if has_labels:
+                O_ID = model.config.label2id.get("O", 0)
+                labels_crf = labels.clone()
+                labels_crf[labels_crf == -100] = O_ID
+                loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
+
             paths = model.crf.decode(emissions, mask=mask)
+
         max_len = emissions.size(1)
-        pred_ids = []
-        for seq in paths:
-            if len(seq) < max_len:
-                seq = seq + [-100] * (max_len - len(seq))
-            pred_ids.append(seq)
+        pred_ids = [seq + [-100] * (max_len - len(seq)) for seq in paths]
         pred = torch.tensor(pred_ids, device=emissions.device, dtype=torch.long)
-        loss = None
-        if has_labels:
-            O_ID = model.config.label2id.get("O", 0)
-            labels_crf = labels.clone()
-            labels_crf[labels_crf == -100] = O_ID
-            loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
+
         if prediction_loss_only:
             return (loss, None, None)
         return (loss, pred, labels)
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         outputs = model(**inputs)
         loss = outputs["loss"]
         return (loss, outputs) if return_outputs else loss
-
+        
 class BertCRFForTokenClassification(nn.Module):
     def __init__(self, base_model_name, num_labels, id2label, label2id, scheme="BIOES", constraints=None):
         super().__init__()
