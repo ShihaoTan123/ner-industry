@@ -34,10 +34,8 @@ class WeightedTokenTrainer(Trainer):
         **kwargs,
     ):
         labels = inputs.get("labels")
-        if "labels" in inputs:
-            inputs = {k: v for k, v in inputs.items() if k != "labels"}
-
-        outputs = model(**inputs)
+        net_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+        outputs = model(**net_inputs)
         logits  = outputs.logits
 
         cw = self.class_weights.to(device=logits.device, dtype=logits.dtype)
@@ -51,11 +49,14 @@ class CRFTrainer(Trainer):
     def prediction_step(self, model, inputs, prediction_loss_only=False, ignore_keys=None):
         has_labels = "labels" in inputs
         labels = inputs.get("labels")
+
         with torch.no_grad():
-            outputs = model(**{k:v for k,v in inputs.items() if k!="labels"})
-            emissions = outputs["logits"]
-            mask = (labels != -100) if has_labels else inputs["attention_mask"].bool()
+            net_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            outputs = model(**net_inputs)
+            emissions = outputs["logits"].float()
+            mask = inputs["attention_mask"].bool()
             paths = model.crf.decode(emissions, mask=mask)
+
         max_len = emissions.size(1)
         pred_ids = []
         for seq in paths:
@@ -66,13 +67,17 @@ class CRFTrainer(Trainer):
 
         loss = None
         if has_labels:
-            loss = - model.crf(emissions, labels.long(), mask=mask, reduction='mean')
+            O_ID = model.config.label2id.get("O", 0)
+            labels_crf = labels.clone()
+            labels_crf[labels_crf == -100] = O_ID
+            mask = inputs["attention_mask"].bool()
+            loss = - model.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
+
         if prediction_loss_only:
             return (loss, None, None)
         return (loss, pred, labels)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
-        labels = inputs.get("labels")
         outputs = model(**inputs)
         loss = outputs["loss"]
         return (loss, outputs) if return_outputs else loss
@@ -97,8 +102,8 @@ class BertCRFForTokenClassification(nn.Module):
             BIG_NEG = -1e4
             with torch.no_grad():
                 self.crf.transitions[:] = BIG_NEG
-                for (i,j) in constraints["trans"]:
-                    self.crf.transitions[i,j] = 0.0
+                for (i, j) in constraints["trans"]:
+                    self.crf.transitions[i, j] = 0.0
                 self.crf.start_transitions[:] = BIG_NEG
                 self.crf.end_transitions[:]   = BIG_NEG
                 for i in constraints["start_ok"]:
@@ -109,10 +114,15 @@ class BertCRFForTokenClassification(nn.Module):
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         out = self.bert(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
         emissions = self.classifier(out.last_hidden_state).float()
-        mask = (labels != -100) if labels is not None else attention_mask.bool()
+        mask = attention_mask.bool()
+
         loss = None
         if labels is not None:
-            loss = - self.crf(emissions, labels.long(), mask=mask, reduction='mean')
+            O_ID = self.config.label2id.get("O", 0)
+            labels_crf = labels.clone()
+            labels_crf[labels_crf == -100] = O_ID
+            loss = - self.crf(emissions, labels_crf.long(), mask=mask, reduction='mean')
+
         return {"loss": loss, "logits": emissions, "mask": mask}
 
 
@@ -122,7 +132,8 @@ def align_labels_with_tokens(tokenized_inputs, labels, label2id):
         ids = tokenized_inputs.word_ids(batch_index=i)
         prev = None; arr = []
         for wid in ids:
-            if wid is None: arr.append(-100)
+            if wid is None:
+                arr.append(-100)
             elif wid != prev:
                 arr.append(label2id[labs[wid]] if wid < len(labs) else -100)
             else:
@@ -137,7 +148,6 @@ def parse_tag_type(label: str):
     return t, typ
 
 def allowed_transitions(labels, scheme="BIOES"):
-    id2 = {i:l for i,l in enumerate(labels)}
     ok = set()
     for i, L1 in enumerate(labels):
         t1, c1 = parse_tag_type(L1)
@@ -146,24 +156,24 @@ def allowed_transitions(labels, scheme="BIOES"):
             legal = False
             if scheme == "BIO":
                 if t1 == "O":
-                    legal = (t2 in ("O","B"))
+                    legal = (t2 in ("O", "B"))
                 elif t1 == "B":
-                    legal = (t2 in ("I","O","B")) and (t2!="I" or c2==c1)
+                    legal = (t2 in ("I", "O", "B")) and (t2 != "I" or c2 == c1)
                 elif t1 == "I":
-                    legal = (t2 in ("I","O","B")) and (t2!="I" or c2==c1)
+                    legal = (t2 in ("I", "O", "B")) and (t2 != "I" or c2 == c1)
             else:
                 if t1 == "O":
-                    legal = (t2 in ("O","B","S"))
+                    legal = (t2 in ("O", "B", "S"))
                 elif t1 == "B":
-                    legal = (t2 in ("I","E")) and (c2==c1)
+                    legal = (t2 in ("I", "E")) and (c2 == c1)
                 elif t1 == "I":
-                    legal = (t2 in ("I","E")) and (c2==c1)
+                    legal = (t2 in ("I", "E")) and (c2 == c1)
                 elif t1 == "E":
-                    legal = (t2 in ("O","B","S"))
+                    legal = (t2 in ("O", "B", "S"))
                 elif t1 == "S":
-                    legal = (t2 in ("O","B","S"))
+                    legal = (t2 in ("O", "B", "S"))
             if legal:
-                ok.add((i,j))
+                ok.add((i, j))
     return ok
 
 def start_end_allowed(labels, scheme="BIOES"):
@@ -171,13 +181,12 @@ def start_end_allowed(labels, scheme="BIOES"):
     for i, L in enumerate(labels):
         t, _ = parse_tag_type(L)
         if scheme == "BIO":
-            if L=="O" or t in ("B",): start_ok.add(i)
-            if L=="O" or t in ("I",): end_ok.add(i)
+            if L == "O" or t in ("B",): start_ok.add(i)
+            if L == "O" or t in ("B", "I"): end_ok.add(i)
         else:
-            if L=="O" or t in ("B","S"): start_ok.add(i)
-            if L=="O" or t in ("E","S"): end_ok.add(i)
+            if L == "O" or t in ("B", "S"): start_ok.add(i)
+            if L == "O" or t in ("E", "S"): end_ok.add(i)
     return start_ok, end_ok
-
 
 def make_metrics_fn(id2label, num_labels):
     def _metrics_fn(eval_preds):
@@ -229,7 +238,6 @@ def main():
     ap.add_argument("--task_weight", type=float, default=1.5, help="extra multiplier for *-Task")
     ap.add_argument("--use_crf", action="store_true", help="use CRF loss + constrained Viterbi decode")
     ap.add_argument("--scheme", choices=["BIO","BIOES"], default="BIOES", help="label scheme for constraints")
-
     args = ap.parse_args()
 
     if args.fp16 and args.bf16:
@@ -346,7 +354,7 @@ def main():
 
     preds = pred_out.predictions
     gold  = pred_out.label_ids
-    
+
     preds = np.array(preds)
     if preds.ndim == 3 and preds.shape[-1] == len(labels):
         preds = np.argmax(preds, axis=-1)
@@ -373,6 +381,7 @@ def main():
     print(f"Precision: {test_metrics.get('eval_precision', 0):.4f}")
     print(f"Recall: {test_metrics.get('eval_recall', 0):.4f}")
     print(rep)
+
 
 if __name__ == "__main__":
     main()
