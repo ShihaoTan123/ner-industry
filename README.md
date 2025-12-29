@@ -34,7 +34,3 @@ Datasets are **not redistributed** in this repository. Please download them from
 
 ## Environment
 Python 3.x is recommended.
-
-Install dependencies (example):
-```bash
-pip install -r requirements.txt
